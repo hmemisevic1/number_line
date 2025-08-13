@@ -1,0 +1,305 @@
+
+<!DOCTYPE html>
+<html lang="bs">
+<head>
+<meta charset="UTF-8">
+<title>Test procjene na brojevnoj liniji (7–10 godina)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{
+    --accent:#2563eb;
+    --ok:#16a34a;
+    --warn:#ca8a04;
+    --bad:#dc2626;
+  }
+  body{font-family:system-ui,Arial,sans-serif; margin:24px; line-height:1.45; color:#111827;}
+  h1{font-size:clamp(20px,3vw,28px); margin-bottom:8px}
+  .muted{color:#6b7280}
+  .card{border:1px solid #e5e7eb; border-radius:16px; padding:16px; box-shadow:0 4px 12px rgba(0,0,0,0.06); margin:16px 0}
+  .controls{display:flex; gap:12px; align-items:center; flex-wrap:wrap}
+  button{border:0; background:var(--accent); color:white; padding:10px 14px; border-radius:12px; cursor:pointer; font-weight:600}
+  button.secondary{background:#374151}
+  button.ghost{background:transparent; color:#374151; border:1px solid #d1d5db}
+  input[type=number]{padding:10px 12px; border:1px solid #d1d5db; border-radius:10px; width:140px}
+  #stage{display:none}
+  .range-tag{display:inline-block; background:#eef2ff; color:#3730a3; font-weight:700; padding:4px 10px; border-radius:999px; font-size:14px}
+  .line-wrap{margin-top:18px; margin-bottom:8px}
+  svg{width:100%; height:80px}
+  .tick text{font-size:12px; fill:#374151}
+  .feedback{font-weight:700; margin-top:6px}
+  .feedback.ok{color:var(--ok)}
+  .feedback.warn{color:var(--warn)}
+  .feedback.bad{color:var(--bad)}
+  .grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px}
+  table{border-collapse:collapse; width:100%}
+  th,td{border:1px solid #e5e7eb; padding:8px; text-align:center}
+  th{background:#f9fafb}
+  .small{font-size:13px}
+</style>
+</head>
+<body>
+  <h1>🧭 Test procjene na brojevnoj liniji</h1>
+  <p class="muted">Dob uzrasta: 7–10 godina. Test je <b>inkrementalan po težini</b> i mjeri tačnost procjene položaja broja na liniji za raspon: <b>0–10</b>, <b>0–50</b>, <b>0–100</b>, <b>0–1000</b>.</p>
+
+  <div class="card">
+    <div class="grid">
+      <div>
+        <label>Broj zadataka po rasponu:</label><br>
+        <input id="trialsPerRange" type="number" min="3" max="20" value="5">
+      </div>
+      <div>
+        <label>Prag brze povratne informacije (PAE %):</label><br>
+        <input id="quickFb" type="number" min="1" max="50" value="12">
+      </div>
+    </div>
+    <div class="controls" style="margin-top:10px">
+      <button id="startBtn">Započni test</button>
+      <button id="resetBtn" class="ghost" disabled>Reset</button>
+    </div>
+    <p class="small muted">PAE = Percentualna apsolutna greška = |procjena − cilj| / raspon × 100</p>
+  </div>
+
+  <div id="stage" class="card">
+    <div>Raspon: <span id="rangeTag" class="range-tag">0–10</span> &nbsp; Zad. <span id="trialCounter">1</span>/<span id="trialTotal">5</span></div>
+    <div class="line-wrap">
+      <svg id="numberline" viewBox="0 0 800 100" preserveAspectRatio="none" aria-label="brojevna linija">
+        <!-- Linija i oznake se crtaju u skripti -->
+      </svg>
+    </div>
+    <div class="controls">
+      <label for="estimate">Tvoja procjena:</label>
+      <input id="estimate" type="number" step="1">
+      <button id="submitBtn">Potvrdi</button>
+      <span id="trialFeedback" class="feedback"></span>
+    </div>
+  </div>
+
+  <div id="results" class="card" style="display:none">
+    <h2>Rezultati</h2>
+    <div id="summary"></div>
+    <div style="margin-top:10px" class="controls">
+      <button id="downloadCsv" class="secondary">Preuzmi CSV</button>
+      <button id="tryAgain" class="ghost">Ponovo</button>
+    </div>
+  </div>
+
+<script>
+(function(){
+  // Config
+  const ranges = [10, 50, 100, 1000]; // gornje granice (0–X)
+  let trialsPerRange = 5;
+  let quickFeedbackPAE = 12; // %
+  const svg = document.getElementById('numberline');
+  const rangeTag = document.getElementById('rangeTag');
+  const trialCounter = document.getElementById('trialCounter');
+  const trialTotal = document.getElementById('trialTotal');
+  const estimateInput = document.getElementById('estimate');
+  const trialFeedback = document.getElementById('trialFeedback');
+  const stage = document.getElementById('stage');
+
+  // State
+  let currentRangeIdx = 0;
+  let trialInRange = 0;
+  let currentTarget = 0;
+  let records = []; // {rangeMax, target, estimate, absError, pae, xPos}
+
+  // UI helpers
+  function setDisabled(id, disabled){ document.getElementById(id).disabled = disabled; }
+
+  // Draw number line for given range and target position
+  function drawLine(rangeMax, target){
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    const W = 800, H = 100, y = 60, pad = 60;
+    const line = document.createElementNS('http://www.w3.org/2000/svg','line');
+    line.setAttribute('x1', pad); line.setAttribute('x2', W - pad);
+    line.setAttribute('y1', y); line.setAttribute('y2', y);
+    line.setAttribute('stroke', '#111827'); line.setAttribute('stroke-width', '3');
+    svg.appendChild(line);
+
+    // Ticks: always show 0 and rangeMax, midpoints based on range
+    const ticks = [0, rangeMax];
+    if (rangeMax === 10){ ticks.splice(1,0,5); }
+    if (rangeMax === 50){ ticks.splice(1,0,10,20,30,40); }
+    if (rangeMax === 100){ ticks.splice(1,0,20,40,60,80); }
+    if (rangeMax === 1000){ ticks.splice(1,0,100,200,300,400,500,600,700,800,900); }
+
+    ticks.forEach(t=>{
+      const x = pad + (W-2*pad)*(t/rangeMax);
+      const tline = document.createElementNS('http://www.w3.org/2000/svg','line');
+      tline.setAttribute('x1', x); tline.setAttribute('x2', x);
+      tline.setAttribute('y1', y-8); tline.setAttribute('y2', y+8);
+      tline.setAttribute('stroke', '#374151'); tline.setAttribute('stroke-width', '2');
+      tline.setAttribute('class','tick');
+      svg.appendChild(tline);
+
+      const text = document.createElementNS('http://www.w3.org/2000/svg','text');
+      text.setAttribute('x', x); text.setAttribute('y', y+24);
+      text.setAttribute('text-anchor','middle'); text.textContent = t;
+      text.setAttribute('class','tick');
+      svg.appendChild(text);
+    });
+
+    // Target marker (unknown number, only position is shown)
+    const xTarget = pad + (W-2*pad)*(target/rangeMax);
+    const targetMark = document.createElementNS('http://www.w3.org/2000/svg','circle');
+    targetMark.setAttribute('cx', xTarget); targetMark.setAttribute('cy', y);
+    targetMark.setAttribute('r', 7); targetMark.setAttribute('fill', '#2563eb');
+    svg.appendChild(targetMark);
+    return xTarget;
+  }
+
+  function randomTarget(rangeMax){
+    // Choose from integers but avoid always near ticks: uniform across range
+    // Also ensure not exactly on min/max
+    let t;
+    do {
+      t = Math.floor(Math.random() * (rangeMax-1)) + 1;
+    } while (rangeMax <= 50 && [0, rangeMax].includes(t));
+    return t;
+  }
+
+  function nextTrial(){
+    if (trialInRange >= trialsPerRange){
+      // move to next range
+      currentRangeIdx++;
+      trialInRange = 0;
+      if (currentRangeIdx >= ranges.length){
+        finish();
+        return;
+      }
+    }
+    const rangeMax = ranges[currentRangeIdx];
+    rangeTag.textContent = `0–${rangeMax}`;
+    trialInRange++;
+    trialCounter.textContent = trialInRange;
+    trialTotal.textContent = trialsPerRange;
+    currentTarget = randomTarget(rangeMax);
+    const xPos = drawLine(rangeMax, currentTarget);
+    estimateInput.value = "";
+    estimateInput.min = 0;
+    estimateInput.max = rangeMax;
+    estimateInput.focus();
+    trialFeedback.textContent = "";
+    trialFeedback.className = "feedback";
+  }
+
+  function grade(estimate, target, rangeMax){
+    const absErr = Math.abs(estimate - target);
+    const pae = (absErr / rangeMax) * 100;
+    return {absErr, pae};
+  }
+
+  function feedbackForPAE(p){
+    if (p <= quickFeedbackPAE) return {cls:'ok', msg:'Odlična procjena!'};
+    if (p <= quickFeedbackPAE*2) return {cls:'warn', msg:'Dobra procjena, može i bolje.'};
+    return {cls:'bad', msg:'Pokušaj procijeniti još pažljivije.'};
+  }
+
+  function finish(){
+    stage.style.display = "none";
+    document.getElementById('results').style.display = "block";
+
+    // Aggregate per range
+    const byRange = {};
+    for (const r of ranges) byRange[r] = [];
+    records.forEach(rec => byRange[rec.rangeMax].push(rec));
+
+    const summaryDiv = document.getElementById('summary');
+    summaryDiv.innerHTML = "";
+    let overall = [];
+    const tbl = document.createElement('table');
+    tbl.innerHTML = `<thead><tr>
+      <th>Raspon</th><th>N</th><th>Srednji PAE (%)</th><th>Medijan PAE (%)</th><th>SD PAE</th>
+    </tr></thead><tbody></tbody>`;
+    const tbody = tbl.querySelector('tbody');
+
+    function mean(arr){ return arr.reduce((a,b)=>a+b,0)/arr.length; }
+    function median(arr){ const s=[...arr].sort((a,b)=>a-b); const m=Math.floor(s.length/2); return s.length%2?s[m]:(s[m-1]+s[m])/2; }
+    function sd(arr){ const m=mean(arr); return Math.sqrt(mean(arr.map(x=>(x-m)*(x-m)))); }
+    const fmt = (x)=> (isFinite(x)? x.toFixed(2):"-");
+
+    ranges.forEach(r=>{
+      const items = byRange[r];
+      const paes = items.map(i=>i.pae);
+      overall = overall.concat(paes);
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>0–${r}</td><td>${items.length}</td><td>${fmt(mean(paes))}</td><td>${fmt(median(paes))}</td><td>${fmt(sd(paes))}</td>`;
+      tbody.appendChild(tr);
+    });
+    const foot = document.createElement('tr');
+    foot.innerHTML = `<td><b>Ukupno</b></td><td>${records.length}</td><td colspan="3"><b>Srednji PAE:</b> ${fmt(overall.length? (overall.reduce((a,b)=>a+b,0)/overall.length):NaN)}%</td>`;
+    tbody.appendChild(foot);
+    summaryDiv.appendChild(tbl);
+  }
+
+  // Events
+  document.getElementById('startBtn').addEventListener('click', ()=>{
+    trialsPerRange = Math.max(3, Math.min(20, parseInt(document.getElementById('trialsPerRange').value || "5")));
+    quickFeedbackPAE = Math.max(2, Math.min(50, parseInt(document.getElementById('quickFb').value || "12")));
+    records = [];
+    currentRangeIdx = 0;
+    trialInRange = 0;
+    document.getElementById('results').style.display = "none";
+    stage.style.display = "block";
+    setDisabled('startBtn', true);
+    setDisabled('resetBtn', false);
+    nextTrial();
+  });
+
+  document.getElementById('resetBtn').addEventListener('click', ()=>{
+    // Hard reset UI
+    records = [];
+    currentRangeIdx = 0;
+    trialInRange = 0;
+    stage.style.display = "none";
+    document.getElementById('results').style.display = "none";
+    setDisabled('startBtn', false);
+    setDisabled('resetBtn', true);
+    trialFeedback.textContent = "";
+  });
+
+  function submitCurrent(){
+    const rangeMax = ranges[currentRangeIdx];
+    const val = parseFloat(estimateInput.value);
+    if (isNaN(val)) { trialFeedback.textContent = "Upiši broj."; trialFeedback.className="feedback bad"; return; }
+    if (val < 0 || val > rangeMax){ trialFeedback.textContent = `Procjena mora biti između 0 i ${rangeMax}.`; trialFeedback.className="feedback bad"; return; }
+
+    const g = grade(val, currentTarget, rangeMax);
+    const fb = feedbackForPAE(g.pae);
+    trialFeedback.textContent = `${fb.msg} | Tačan broj: ${currentTarget} | Greška: ${g.absErr} (PAE ${g.pae.toFixed(2)}%).`;
+    trialFeedback.className = "feedback " + fb.cls;
+
+    // Save record
+    records.push({rangeMax, target: currentTarget, estimate: val, absError: g.absErr, pae: g.pae});
+
+    // Next after short delay
+    setTimeout(nextTrial, 900);
+  }
+
+  document.getElementById('submitBtn').addEventListener('click', submitCurrent);
+  estimateInput.addEventListener('keydown', (e)=>{
+    if (e.key === 'Enter'){ submitCurrent(); }
+  });
+
+  // CSV download
+  document.getElementById('downloadCsv').addEventListener('click', ()=>{
+    if (!records.length) return;
+    const header = ["rangeMax","target","estimate","absError","PAE_percent"];
+    const rows = records.map(r=>[r.rangeMax, r.target, r.estimate, r.absError, r.pae.toFixed(4)]);
+    const csv = [header.join(","), ...rows.map(r=>r.join(","))].join("\n");
+    const blob = new Blob([csv], {type:"text/csv"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = "numberline_results.csv";
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  });
+
+  document.getElementById('tryAgain').addEventListener('click', ()=>{
+    document.getElementById('resetBtn').click();
+    document.getElementById('startBtn').click();
+  });
+})();
+</script>
+</body>
+</html>
